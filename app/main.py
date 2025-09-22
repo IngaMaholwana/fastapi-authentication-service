@@ -1,145 +1,57 @@
-# app/main.py
-from datetime import datetime, timedelta
-from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from jose import JWTError, jwt
-from passlib.context import CryptContext
-from pydantic import BaseModel
 
-# Security configurations
-SECRET_KEY = "your-secret-key-for-jwt"  # In production, use a proper secret key management
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-# Simulated user database
-fake_users_db = {
-    "johndoe": {
-        "username": "johndoe",
-        "full_name": "John Doe",
-        "email": "johndoe@example.com",
-        "hashed_password": "$2b$12$EixZaYVK1fsbw1ZfbX3OXePaWxn96p36WQoeG6Lruj3vjPGga31lW",  # "secret"
-        "disabled": False,
-    }
-}
+#Creating a basic FastAPI app loger
+import logging
+import uvicorn
+import sys
+from loguru import logger
+from fastapi import FastAPI, Request
 
-# Models
-class Token(BaseModel):
-    access_token: str
-    token_type: str
+class InterceptHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        # Get corresponding Loguru level if it exists
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
 
-class TokenData(BaseModel):
-    username: Optional[str] = None
+        # Find caller from where originated the logged message
+        frame, depth = logging.currentframe(), 2
+        while frame and frame.f_code.co_filename == logging.__file__:
+            frame = frame.f_back
+            depth += 1
 
-class User(BaseModel):
-    username: str
-    email: Optional[str] = None
-    full_name: Optional[str] = None
-    disabled: Optional[bool] = None
+        # Log the message with Loguru
+        logger.opt(depth=depth, exception=record.exc_info).log(
+            level, record.getMessage()
+            )
 
-class UserInDB(User):
-    hashed_password: str
+# logger = logging.getLogger(__name__) this line will be ade by loguru for formatting
+# formmatter = logging.Formatter(
+#     "%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+#     )
+# handler = logging.StreamHandler(sys.stdout)
+# handler.setFormatter(formmatter)
+# logger = logging.getLogger(__name__)
+# logger.setLevel(logging.INFO)
+# logger.addHandler(handler)
 
-# Security utilities
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+for name in logging.root.manager.loggerDict:
+    # print(f"Configuring logger: {name}")
+    if name in ("uvicorn"):
+        uvicorn_logger = logging.getLogger(name)
+        uvicorn_logger.handlers.clear()
+        # uvicorn_logger.addHandler(handler)
+        uvicorn_logger.setLevel(logging.INFO)
+        uvicorn_logger.addHandler(InterceptHandler())
 
-app = FastAPI(title="FastAPI JWT Auth Demo")
+app = FastAPI(title="Basic FastAPI Logger Example .01")
 
-# Password utilities
-def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
+@app.get("/")
+async def root(request: Request) -> dict[str,str]:
+    logger.info("Health chck")
+    return {"Status": "Empilweni Healthy"}
 
-def get_password_hash(password):
-    return pwd_context.hash(password)
-
-# User utilities
-def get_user(db, username: str):
-    if username in db:
-        user_dict = db[username]
-        return UserInDB(**user_dict)
-    return None
-
-def authenticate_user(fake_db, username: str, password: str):
-    user = get_user(fake_db, username)
-    if not user:
-        return False
-    if not verify_password(password, user.hashed_password):
-        return False
-    return user
-
-# Token utilities
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
-
-# Dependency to get current user
-async def get_current_user(token: str = Depends(oauth2_scheme)):
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
-            raise credentials_exception
-        token_data = TokenData(username=username)
-    except JWTError:
-        raise credentials_exception
-    user = get_user(fake_users_db, username=token_data.username)
-    if user is None:
-        raise credentials_exception
-    return user
-
-async def get_current_active_user(current_user: User = Depends(get_current_user)):
-    if current_user.disabled:
-        raise HTTPException(status_code=400, detail="Inactive user")
-    return current_user
-
-# Routes
-@app.post("/token", response_model=Token)
-async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
-    """
-    OAuth2 compatible token login, get an access token for future requests
-    """
-    user = authenticate_user(fake_users_db, form_data.username, form_data.password)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": user.username}, expires_delta=access_token_expires
-    )
-    return {"access_token": access_token, "token_type": "bearer"}
-
-@app.get("/users/me/", response_model=User)
-async def read_users_me(current_user: User = Depends(get_current_active_user)):
-    """
-    Get current user information
-    """
-    return current_user
-
-@app.get("/users/me/items/")
-async def read_own_items(current_user: User = Depends(get_current_active_user)):
-    """
-    Get items belonging to current user
-    """
-    return [{"item_id": "Foo", "owner": current_user.username}]
-
-# How to use this API:
-# 1. Install required packages: pip install fastapi uvicorn python-jose[cryptography] passlib[bcrypt]
-# 2. Run the server: uvicorn main:app --reload
-# 3. Get a token: POST to /token with username=johndoe&password=secret as form data
-# 4. Use the token: Add header "Authorization: Bearer {token}" to requests to protected endpoints
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
